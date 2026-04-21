@@ -27,6 +27,7 @@ Run:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -35,6 +36,56 @@ import urllib.error
 import urllib.request
 
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Investment theses (presets)
+# ---------------------------------------------------------------------------
+# Each thesis is a filter + sort combo that expresses a specific investor
+# viewpoint. Run with `--thesis <name>` to apply one.
+#
+# Filter syntax: {column: (op, threshold)} where op is one of >, >=, <, <=, ==.
+
+THESES: dict[str, dict] = {
+    "balanced": {
+        "description": "Balanced view across growth, yield, and demand signals",
+        "filters": {},
+        "sort_by": "balanced_score",
+    },
+    "yield": {
+        "description": "Income-producing rentals: high cap rate, not declining",
+        "filters": {
+            "rent_to_value": (">", 0.07),          # 7%+ gross yield
+            "population_growth_pct": (">", -0.5),  # market not dying
+            "rent_growth_pct": (">", 0),           # rents not falling
+        },
+        "sort_by": "rent_to_value",
+    },
+    "growth": {
+        "description": "Appreciation + rent escalation: Sun Belt / Mountain West story",
+        "filters": {
+            "population_growth_pct": (">", 2),
+            "rent_growth_pct": (">", 3),
+        },
+        "sort_by": "growth_score",
+    },
+    "affordability": {
+        "description": "Income growing faster than home prices — runway for future appreciation",
+        "filters": {
+            "income_growth_annualized_pct": (">", 2),
+        },
+        "sort_by": "affordability_gap",
+        "requires_income": True,
+    },
+    "contrarian": {
+        "description": "Beat-up markets with compelling yield — mean-reversion bet",
+        "filters": {
+            "home_value_growth_pct": ("<", 0),
+            "rent_to_value": (">", 0.08),
+        },
+        "sort_by": "rent_to_value",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -360,10 +411,67 @@ def get_metro_income_data() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Thesis application
+# ---------------------------------------------------------------------------
+
+_OPS = {
+    ">": lambda s, t: s > t,
+    ">=": lambda s, t: s >= t,
+    "<": lambda s, t: s < t,
+    "<=": lambda s, t: s <= t,
+    "==": lambda s, t: s == t,
+}
+
+
+def apply_thesis(
+    df: pd.DataFrame,
+    thesis_name: str,
+    thesis: dict,
+    income_available: bool,
+) -> pd.DataFrame:
+    """Filter and sort a dataframe according to a named thesis preset."""
+    if thesis.get("requires_income") and not income_available:
+        print(
+            f"[WARN] Thesis '{thesis_name}' requires income data, "
+            "which is unavailable. Returning empty frame."
+        )
+        return df.iloc[0:0].copy()
+
+    result = df.copy()
+
+    # Always compute affordability_gap so sort_by="affordability_gap" works
+    if {"income_growth_annualized_pct", "home_value_growth_pct"}.issubset(result.columns):
+        result["affordability_gap"] = (
+            result["income_growth_annualized_pct"] - result["home_value_growth_pct"]
+        )
+
+    # Apply filters
+    for col, (op, threshold) in thesis["filters"].items():
+        if col not in result.columns:
+            print(f"[WARN] Filter column '{col}' missing; skipping")
+            continue
+        mask = _OPS[op](result[col], threshold)
+        result = result[mask].copy()
+
+    # Sort
+    sort_col = thesis["sort_by"]
+    if sort_col not in result.columns:
+        print(f"[WARN] Sort column '{sort_col}' missing; falling back to balanced_score")
+        sort_col = "balanced_score"
+    result = result.sort_values(sort_col, ascending=False)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def main(top_n_by_size: int = 100) -> None:
+def main(
+    thesis_name: str = "balanced",
+    top_n_by_size: int = 100,
+    show_all_theses: bool = False,
+) -> None:
     """
     top_n_by_size: only rank the N largest metros by Zillow SizeRank.
     Default 100 keeps the results to real markets and kills small-sample
@@ -484,11 +592,6 @@ def main(top_n_by_size: int = 100) -> None:
             + combined["rent_to_value"] * 100 * 0.2
         )
 
-    combined = combined.sort_values("balanced_score", ascending=False)
-
-    output_path = "data/metro_markets_ranked.csv"
-    combined.to_csv(output_path, index=False)
-
     display_cols = [
         "market_display",
         "rent_latest",
@@ -503,10 +606,81 @@ def main(top_n_by_size: int = 100) -> None:
         "balanced_score",
     ]
 
-    print("\nTop 15 Metro Markets (Balanced Score with Population):\n")
-    print(combined[display_cols].head(15).to_string(index=False))
-    print(f"\nSaved to {output_path}")
+    theses_to_run = list(THESES.keys()) if show_all_theses else [thesis_name]
+
+    for name in theses_to_run:
+        if name not in THESES:
+            print(f"\n[ERROR] Unknown thesis '{name}'. Options: {list(THESES.keys())}")
+            continue
+
+        thesis = THESES[name]
+        filtered = apply_thesis(combined, name, thesis, income_available)
+
+        output_path = f"data/metro_markets_{name}.csv"
+        filtered.to_csv(output_path, index=False)
+
+        print("\n" + "=" * 72)
+        print(f"Thesis: {name.upper()}")
+        print(f"  {thesis['description']}")
+        filter_desc = (
+            ", ".join(f"{c} {op} {t}" for c, (op, t) in thesis["filters"].items())
+            or "(no filters)"
+        )
+        print(f"  Filters: {filter_desc}")
+        print(f"  Sort by: {thesis['sort_by']}")
+        print(f"  {len(filtered)} markets match")
+        print("=" * 72)
+
+        if len(filtered) == 0:
+            print("(no metros match this thesis's filters)")
+            continue
+
+        # Add affordability_gap to display if the thesis uses it
+        cols = list(display_cols)
+        if thesis["sort_by"] == "affordability_gap" and "affordability_gap" in filtered.columns:
+            cols.insert(-3, "affordability_gap")
+
+        top_n = min(15, len(filtered))
+        print(f"\nTop {top_n}:\n")
+        print(filtered[cols].head(top_n).to_string(index=False))
+        print(f"\nSaved to {output_path}")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Rank US metro real-estate markets by a chosen investment thesis.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Theses:\n"
+            + "\n".join(
+                f"  {name:<14} {spec['description']}" for name, spec in THESES.items()
+            )
+        ),
+    )
+    parser.add_argument(
+        "--thesis",
+        default="balanced",
+        choices=list(THESES.keys()),
+        help="Investment thesis preset to apply (default: balanced)",
+    )
+    parser.add_argument(
+        "--top-n-by-size",
+        type=int,
+        default=100,
+        help="Keep only the top N metros by Zillow SizeRank (default: 100)",
+    )
+    parser.add_argument(
+        "--all-theses",
+        action="store_true",
+        help="Run every thesis and save each result to its own CSV",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = _parse_args()
+    main(
+        thesis_name=args.thesis,
+        top_n_by_size=args.top_n_by_size,
+        show_all_theses=args.all_theses,
+    )
