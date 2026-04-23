@@ -6,6 +6,7 @@ rankings interactively:
 
 - Pick an investment thesis (balanced / yield / growth / affordability / contrarian)
 - Adjust how many markets to display
+- Search for a specific market by name
 - See a ranked table, a score bar chart, and a US state-level heatmap
 - Download the filtered results as CSV
 
@@ -102,6 +103,12 @@ thesis_name = st.sidebar.selectbox(
 
 top_n = st.sidebar.slider("Top N markets to display", 5, 50, 15)
 
+search_term = st.sidebar.text_input(
+    "Search for a market",
+    placeholder="e.g. Syracuse, Austin, TX",
+    help="Filter by market name. Works alongside the thesis filter.",
+)
+
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Data last refreshed: {last_refresh.strftime('%Y-%m-%d %H:%M %Z')}")
 st.sidebar.caption(
@@ -110,11 +117,17 @@ st.sidebar.caption(
 
 
 # ---------------------------------------------------------------------------
-# Apply thesis
+# Apply thesis, then search
 # ---------------------------------------------------------------------------
 
 thesis = THESES[thesis_name]
 filtered = apply_thesis(df, thesis_name, thesis, income_available)
+
+if search_term:
+    filtered = filtered[
+        filtered["market_display"].str.contains(search_term, case=False, na=False)
+    ]
+
 
 # ---------------------------------------------------------------------------
 # Top section: thesis summary + headline metrics
@@ -137,6 +150,9 @@ with col_desc:
 
     st.markdown(f"**Sorted by:** `{thesis['sort_by']}`")
 
+    if search_term:
+        st.markdown(f"**Search:** `{search_term}`")
+
     if thesis.get("requires_income") and not income_available:
         st.warning(
             "This thesis requires income data, which is not available in the "
@@ -147,7 +163,8 @@ with col_desc:
 with col_metrics:
     n_total = len(df)
     n_match = len(filtered)
-    st.metric("Markets matching thesis", f"{n_match} / {n_total}")
+    label = "Markets matching search" if search_term else "Markets matching thesis"
+    st.metric(label, f"{n_match} / {n_total}")
     if n_match > 0:
         st.metric("Median rent growth", f"{filtered['rent_growth_pct'].median():.1f}%")
         st.metric("Median gross yield", f"{filtered['rent_to_value'].median() * 100:.2f}%")
@@ -160,12 +177,18 @@ st.markdown("---")
 # ---------------------------------------------------------------------------
 
 if len(filtered) == 0:
-    st.info(
-        "No markets match the current thesis filters. "
-        "Either this thesis is correctly telling you that no metro meets its "
-        "criteria right now, or the thresholds are too tight. Loosen them in "
-        "`backend/main.py` inside the `THESES` dict and rerun."
-    )
+    if search_term:
+        st.info(
+            f"No markets matching '{search_term}' in the {thesis_name} thesis. "
+            "Try clearing the search, changing thesis, or checking spelling."
+        )
+    else:
+        st.info(
+            "No markets match the current thesis filters. "
+            "Either this thesis is correctly telling you that no metro meets its "
+            "criteria right now, or the thresholds are too tight. Loosen them in "
+            "`backend/main.py` inside the `THESES` dict and rerun."
+        )
     st.stop()
 
 
@@ -173,7 +196,10 @@ if len(filtered) == 0:
 # Ranked table
 # ---------------------------------------------------------------------------
 
-st.subheader(f"Top {min(top_n, len(filtered))} Markets")
+if search_term:
+    st.subheader(f"Search results for '{search_term}' ({len(filtered)} markets)")
+else:
+    st.subheader(f"Top {min(top_n, len(filtered))} Markets")
 
 display_cols_base = [
     "market_display",
@@ -218,13 +244,16 @@ st.dataframe(
     use_container_width=True,
     hide_index=True,
     column_config={
-        "Rent ($/mo)": st.column_config.NumberColumn(format="$%.0f"),
-        "Home Value ($)": st.column_config.NumberColumn(format="$%.0f"),
+        "Rent ($/mo)": st.column_config.NumberColumn(format="$%,.0f"),
+        "Home Value ($)": st.column_config.NumberColumn(format="$%,.0f"),
         "Gross Yield": st.column_config.NumberColumn(format="%.2f%%"),
         "Rent YoY %": st.column_config.NumberColumn(format="%.2f%%"),
         "Home Value YoY %": st.column_config.NumberColumn(format="%.2f%%"),
         "Pop Growth %": st.column_config.NumberColumn(format="%.2f%%"),
         "Income Growth % (annualized)": st.column_config.NumberColumn(format="%.2f%%"),
+        "Growth Score": st.column_config.NumberColumn(format="%.2f"),
+        "Value Score": st.column_config.NumberColumn(format="%.2f"),
+        "Balanced Score": st.column_config.NumberColumn(format="%.2f"),
     },
 )
 
