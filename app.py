@@ -221,7 +221,9 @@ if sort_col not in display_cols_base and sort_col in filtered.columns:
     display_cols_base.append(sort_col)
 
 display = filtered[display_cols_base].head(top_n).copy()
-
+if "rent_to_value" in display.columns:
+    display["rent_to_value"] = display["rent_to_value"] * 100
+    
 # Nicer column labels
 label_map = {
     "market_display": "Market",
