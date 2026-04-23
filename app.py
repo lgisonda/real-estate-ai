@@ -8,10 +8,11 @@ rankings interactively:
 - Adjust how many markets to display
 - Search for a specific market by name
 - See a ranked table, a score bar chart, and a US state-level heatmap
+- Generate an AI investment memo on any ranked market
 - Download the filtered results as CSV
 
 Run:
-    pip install streamlit plotly pandas
+    pip install streamlit plotly pandas anthropic
     py backend/main.py          # (first, to generate data/metro_markets_balanced.csv)
     streamlit run app.py
 """
@@ -22,6 +23,7 @@ import os
 import sys
 from pathlib import Path
 
+import anthropic
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -223,7 +225,7 @@ if sort_col not in display_cols_base and sort_col in filtered.columns:
 display = filtered[display_cols_base].head(top_n).copy()
 if "rent_to_value" in display.columns:
     display["rent_to_value"] = display["rent_to_value"] * 100
-    
+
 # Nicer column labels
 label_map = {
     "market_display": "Market",
@@ -258,6 +260,59 @@ st.dataframe(
         "Balanced Score": st.column_config.NumberColumn(format="%.2f"),
     },
 )
+
+
+# ---------------------------------------------------------------------------
+# AI investment memo
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.subheader("AI Investment Memo")
+st.caption(
+    "Pick a market from the ranked table above and Claude will write a short "
+    "analyst-style take on it."
+)
+
+memo_market = st.selectbox(
+    "Market to analyze",
+    options=filtered["market_display"].head(top_n).tolist(),
+    key="memo_market",
+)
+
+
+@st.cache_data(show_spinner="Claude is drafting your memo...")
+def generate_memo(market_name: str, row_dict: dict, thesis_name: str) -> str:
+    client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+    prompt = f"""You are a real estate investment analyst. Write a concise, one-paragraph investment memo (4-6 sentences) on the following metro market. Be direct and grounded — no hype, no hedging. Identify whether this is a cash-flow play, an appreciation play, or both, and name one specific risk.
+
+Market: {market_name}
+Investment thesis being evaluated: {thesis_name}
+
+Data:
+- Median rent: ${row_dict['rent_latest']:,.0f}/month
+- Rent growth YoY: {row_dict['rent_growth_pct']:.1f}%
+- Median home value: ${row_dict['home_value_latest']:,.0f}
+- Home value growth YoY: {row_dict['home_value_growth_pct']:.1f}%
+- Population growth (2020-2023 cumulative, ~3 years): {row_dict['population_growth_pct']:.1f}%
+- Gross rental yield: {row_dict['rent_to_value'] * 100:.2f}%
+- Growth score: {row_dict['growth_score']:.2f}
+- Value score: {row_dict['value_score']:.2f}
+- Balanced score: {row_dict['balanced_score']:.2f}
+
+Write for an investor who understands real estate fundamentals. Don't repeat the numbers back — interpret them."""
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return message.content[0].text
+
+
+if st.button("Generate investment memo", type="primary"):
+    row = filtered[filtered["market_display"] == memo_market].iloc[0].to_dict()
+    memo = generate_memo(memo_market, row, thesis_name)
+    st.markdown(memo)
 
 
 # ---------------------------------------------------------------------------
